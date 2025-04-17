@@ -1,9 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 
 function Camera() {
-  const [mode, setMode] = useState('photo'); // 'photo' or 'video'
+  const [mode, setMode] = useState('photo');
   const [isRecording, setIsRecording] = useState(false);
-  const [mediaItems, setMediaItems] = useState([]);
+  const [mediaItems, setMediaItems] = useState(() => {
+    const savedItems = localStorage.getItem('cameraMediaItems');
+    return savedItems ? JSON.parse(savedItems) : [];
+  });
   const [selectedItem, setSelectedItem] = useState(null);
   
   const videoRef = useRef(null);
@@ -16,6 +19,10 @@ function Camera() {
       stopCamera();
     };
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('cameraMediaItems', JSON.stringify(mediaItems));
+  }, [mediaItems]);
 
   const startCamera = async () => {
     try {
@@ -43,48 +50,84 @@ function Camera() {
     canvas.height = videoRef.current.videoHeight;
     canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
     const imageUrl = canvas.toDataURL('image/jpeg');
-    setMediaItems([...mediaItems, {
+    const newMediaItem = {
+      id: Date.now(),
       type: 'photo',
       url: imageUrl,
       timestamp: new Date().toLocaleString()
-    }]);
+    };
+    setMediaItems(prevItems => [...prevItems, newMediaItem]);
   };
 
-  const startRecording = () => {
-    chunksRef.current = [];
-    const stream = videoRef.current.srcObject;
-    const mediaRecorder = new MediaRecorder(stream);
-    
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        chunksRef.current.push(e.data);
+  const startRecording = async () => {
+    try {
+      if (!videoRef.current || !videoRef.current.srcObject) {
+        await startCamera();
       }
-    };
 
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-      const videoUrl = URL.createObjectURL(blob);
-      setMediaItems([...mediaItems, {
-        type: 'video',
-        url: videoUrl,
-        timestamp: new Date().toLocaleString()
-      }]);
-    };
+      const stream = videoRef.current.srcObject;
+      if (!stream) {
+        throw new Error('No media stream available');
+      }
 
-    mediaRecorder.start();
-    mediaRecorderRef.current = mediaRecorder;
-    setIsRecording(true);
+      chunksRef.current = [];
+      const mediaRecorder = new MediaRecorder(stream);
+      
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          chunksRef.current.push(e.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+        const videoUrl = URL.createObjectURL(blob);
+        const newMediaItem = {
+          id: Date.now(),
+          type: 'video',
+          url: videoUrl,
+          timestamp: new Date().toLocaleString(),
+          blob: blob // Store the blob for later use
+        };
+        setMediaItems(prevItems => [...prevItems, newMediaItem]);
+      };
+
+      mediaRecorder.start();
+      mediaRecorderRef.current = mediaRecorder;
+      setIsRecording(true);
+    } catch (error) {
+      console.error('Error starting recording:', error);
+      alert('Failed to start recording. Please make sure camera access is granted.');
+    }
   };
 
   const stopRecording = () => {
-    mediaRecorderRef.current.stop();
-    setIsRecording(false);
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
   };
 
   const deleteItem = (index) => {
-    const newMediaItems = [...mediaItems];
-    newMediaItems.splice(index, 1);
-    setMediaItems(newMediaItems);
+    setMediaItems(prevItems => {
+      const newItems = [...prevItems];
+      const deletedItem = newItems[index];
+      
+      // Revoke object URL for videos to prevent memory leaks
+      if (deletedItem.type === 'video') {
+        URL.revokeObjectURL(deletedItem.url);
+      }
+      
+      newItems.splice(index, 1);
+      return newItems;
+    });
+  };
+
+  const handleModeChange = async (newMode) => {
+    setMode(newMode);
+    // Restart camera with new audio settings when switching modes
+    await stopCamera();
+    await startCamera();
   };
 
   return (
@@ -92,15 +135,15 @@ function Camera() {
       <div className="camera-controls">
         <button 
           className={`mode-button ${mode === 'photo' ? 'active' : ''}`}
-          onClick={() => setMode('photo')}
+          onClick={() => handleModeChange('photo')}
         >
-          Photo Mode
+          📸 Photo Mode
         </button>
         <button 
           className={`mode-button ${mode === 'video' ? 'active' : ''}`}
-          onClick={() => setMode('video')}
+          onClick={() => handleModeChange('video')}
         >
-          Video Mode
+          🎥 Video Mode
         </button>
       </div>
 
@@ -123,17 +166,17 @@ function Camera() {
                 className={`record-button ${isRecording ? 'recording' : ''}`}
                 onClick={isRecording ? stopRecording : startRecording}
               >
-                {isRecording ? '⏹️ Stop' : '⏺️ Record'}
+                {isRecording ? '⏹️ Stop Recording' : '⏺️ Start Recording'}
               </button>
             )}
           </div>
         </div>
 
         <div className="gallery">
-          <h2>Gallery</h2>
+          <h2>📁 Gallery</h2>
           <div className="media-grid">
             {mediaItems.map((item, index) => (
-              <div key={index} className="media-item" onClick={() => setSelectedItem(item)}>
+              <div key={item.id} className="media-item" onClick={() => setSelectedItem(item)}>
                 {item.type === 'photo' ? (
                   <img src={item.url} alt={`Captured ${item.timestamp}`} />
                 ) : (
@@ -144,7 +187,9 @@ function Camera() {
                   <button className="delete-button" onClick={(e) => {
                     e.stopPropagation();
                     deleteItem(index);
-                  }}>🗑️</button>
+                  }}>
+                    🗑️
+                  </button>
                 </div>
               </div>
             ))}
@@ -154,13 +199,18 @@ function Camera() {
 
       {selectedItem && (
         <div className="preview-modal" onClick={() => setSelectedItem(null)}>
-          <div className="modal-content">
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
             {selectedItem.type === 'photo' ? (
               <img src={selectedItem.url} alt="Preview" />
             ) : (
               <video src={selectedItem.url} controls autoPlay />
             )}
-            <button className="close-button">✖️</button>
+            <button 
+              className="close-button" 
+              onClick={() => setSelectedItem(null)}
+            >
+              ✖️
+            </button>
           </div>
         </div>
       )}
